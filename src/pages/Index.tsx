@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import Icon from "@/components/ui/icon";
 
 type Section = "home" | "upload" | "processing" | "gallery" | "editor" | "stats" | "settings" | "docs";
@@ -119,19 +119,166 @@ function HomeSection() {
   );
 }
 
+type UploadSource = "device" | "link" | "cloud";
+type UploadPhase = "idle" | "downloading" | "rendering" | "done";
+type DetectedMoment = { time: string; type: "action" | "music" | "effect"; label: string };
+
+function detectSourcePlatform(url: string): string {
+  const u = url.toLowerCase();
+  if (u.includes("youtu")) return "YouTube";
+  if (u.includes("vk.com") || u.includes("vkvideo")) return "VK";
+  if (u.includes("rutube")) return "Rutube";
+  if (u.includes("drive.google")) return "Google Drive";
+  if (u.includes("disk.yandex") || u.includes("yadi.sk")) return "Яндекс Диск";
+  if (u.includes("dropbox")) return "Dropbox";
+  if (u.includes("tiktok")) return "TikTok";
+  if (u.includes("vimeo")) return "Vimeo";
+  return "Прямая ссылка";
+}
+
 function UploadSection() {
   const [dragging, setDragging] = useState(false);
+  const [modalSource, setModalSource] = useState<UploadSource | null>(null);
+  const [linkUrl, setLinkUrl] = useState("");
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [phase, setPhase] = useState<UploadPhase>("idle");
+  const [progress, setProgress] = useState(0);
+  const [renderProgress, setRenderProgress] = useState(0);
+  const [detectedMoments, setDetectedMoments] = useState<DetectedMoment[]>([]);
+  const [activeJob, setActiveJob] = useState<{ name: string; platform: string; source: UploadSource } | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const MOMENT_POOL: DetectedMoment[] = [
+    { time: "00:08", type: "action", label: "Движение в кадре" },
+    { time: "00:21", type: "music", label: "Сильная доля — точка монтажа" },
+    { time: "00:34", type: "action", label: "Ключевой момент: смена ракурса" },
+    { time: "00:47", type: "effect", label: "Уместен эффект: zoom-in" },
+    { time: "01:12", type: "music", label: "Пик громкости — синхронизация" },
+    { time: "01:28", type: "action", label: "Обнаружено лицо в кадре" },
+    { time: "01:45", type: "effect", label: "Slow motion рекомендуется" },
+    { time: "02:03", type: "music", label: "Дроп трека — резкий монтаж" },
+    { time: "02:19", type: "action", label: "Быстрое движение объекта" },
+    { time: "02:42", type: "effect", label: "Glitch transition подойдёт" },
+    { time: "03:01", type: "music", label: "Смена ритма" },
+    { time: "03:24", type: "action", label: "Эмоциональный момент" },
+  ];
+
+  const openModal = (source: UploadSource) => {
+    if (phase !== "idle" && phase !== "done") return;
+    setModalSource(source);
+    setLinkUrl("");
+    setSelectedFile(null);
+    if (source === "device") {
+      setTimeout(() => fileInputRef.current?.click(), 50);
+    }
+  };
+
+  const closeModal = () => {
+    if (phase === "downloading" || phase === "rendering") return;
+    setModalSource(null);
+    setLinkUrl("");
+    setSelectedFile(null);
+    if (phase === "done") {
+      setPhase("idle");
+      setProgress(0);
+      setRenderProgress(0);
+      setDetectedMoments([]);
+      setActiveJob(null);
+    }
+  };
+
+  const handleFilePick = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0];
+    if (f) setSelectedFile(f);
+  };
+
+  const startJob = () => {
+    if (!modalSource) return;
+    let name = "video.mp4";
+    let platform = "Локальный файл";
+    if (modalSource === "device") {
+      if (!selectedFile) { fileInputRef.current?.click(); return; }
+      name = selectedFile.name;
+      platform = "Устройство";
+    } else {
+      if (!linkUrl.trim()) return;
+      platform = detectSourcePlatform(linkUrl);
+      const m = linkUrl.match(/([^/?&=]+)$/);
+      name = `${platform.toLowerCase().replace(/\s/g, "_")}_${(m?.[1] || "video").slice(0, 12)}.mp4`;
+    }
+    setActiveJob({ name, platform, source: modalSource });
+    setPhase("downloading");
+    setProgress(0);
+    setRenderProgress(0);
+    setDetectedMoments([]);
+  };
+
+  // Downloading animation
+  useEffect(() => {
+    if (phase !== "downloading") return;
+    const interval = setInterval(() => {
+      setProgress((p) => {
+        const next = p + Math.random() * 6 + 2;
+        if (next >= 100) {
+          clearInterval(interval);
+          setTimeout(() => setPhase("rendering"), 400);
+          return 100;
+        }
+        return next;
+      });
+    }, 180);
+    return () => clearInterval(interval);
+  }, [phase]);
+
+  // Rendering animation
+  useEffect(() => {
+    if (phase !== "rendering") return;
+    let momentIdx = 0;
+    const interval = setInterval(() => {
+      setRenderProgress((p) => {
+        const next = p + Math.random() * 3 + 1.5;
+        const newProgress = Math.min(next, 100);
+        const expectedMoments = Math.floor((newProgress / 100) * MOMENT_POOL.length);
+        if (expectedMoments > momentIdx && momentIdx < MOMENT_POOL.length) {
+          const toAdd = MOMENT_POOL.slice(momentIdx, expectedMoments);
+          setDetectedMoments((prev) => [...prev, ...toAdd]);
+          momentIdx = expectedMoments;
+        }
+        if (newProgress >= 100) {
+          clearInterval(interval);
+          setDetectedMoments(MOMENT_POOL);
+          setTimeout(() => setPhase("done"), 500);
+          return 100;
+        }
+        return newProgress;
+      });
+    }, 280);
+    return () => clearInterval(interval);
+  }, [phase]);
+
+  const isProcessing = phase === "downloading" || phase === "rendering";
+
   return (
     <div className="space-y-6 animate-fade-in">
       <div>
         <h1 className="font-orbitron text-2xl font-bold neon-text-cyan mb-1">ЗАГРУЗКА ФАЙЛОВ</h1>
         <p className="text-muted-foreground text-sm">Поддерживаются MP4, MOV, AVI, MKV до 10 ГБ</p>
       </div>
+
       <div
         className={`rounded-xl border-2 border-dashed p-16 text-center transition-all duration-300 cursor-pointer ${dragging ? "border-neon-cyan bg-neon-cyan/5 scale-[1.01]" : "border-border hover:border-neon-cyan/50 hover:bg-neon-cyan/5 glass-card"}`}
         onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
         onDragLeave={() => setDragging(false)}
-        onDrop={() => setDragging(false)}
+        onDrop={(e) => {
+          e.preventDefault();
+          setDragging(false);
+          const f = e.dataTransfer.files?.[0];
+          if (f) {
+            setSelectedFile(f);
+            setModalSource("device");
+          }
+        }}
+        onClick={() => openModal("device")}
       >
         <div className={`w-16 h-16 rounded-2xl mx-auto mb-4 flex items-center justify-center ${dragging ? "bg-neon-cyan/20 border border-neon-cyan" : "bg-secondary border border-border"}`}>
           <Icon name="Upload" size={28} className={dragging ? "text-neon-cyan" : "text-muted-foreground"} />
@@ -140,42 +287,281 @@ function UploadSection() {
         <p className="text-muted-foreground text-sm mb-4">или нажмите для выбора файлов</p>
         <button className="neon-btn px-6 py-2 rounded-lg font-orbitron text-sm">ВЫБРАТЬ ФАЙЛЫ</button>
       </div>
+
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        {[
-          { icon: "HardDrive", title: "С устройства", desc: "Файлы с компьютера или телефона" },
-          { icon: "Link", title: "По ссылке", desc: "YouTube, VK, Rutube, прямые ссылки" },
-          { icon: "Cloud", title: "Облако", desc: "Google Drive, Яндекс Диск, Dropbox" },
-        ].map((o, i) => (
-          <div key={i} className="glass-card rounded-xl p-5 border hover:border-neon-cyan/40 transition-all cursor-pointer hover:scale-[1.02]">
+        {([
+          { source: "device" as UploadSource, icon: "HardDrive", title: "С устройства", desc: "Файлы с компьютера или телефона" },
+          { source: "link" as UploadSource, icon: "Link", title: "По ссылке", desc: "YouTube, VK, Rutube, прямые ссылки" },
+          { source: "cloud" as UploadSource, icon: "Cloud", title: "Облако", desc: "Google Drive, Яндекс Диск, Dropbox" },
+        ]).map((o, i) => (
+          <button
+            key={i}
+            onClick={() => openModal(o.source)}
+            className="glass-card rounded-xl p-5 border hover:border-neon-cyan/40 transition-all cursor-pointer hover:scale-[1.02] text-left"
+          >
             <Icon name={o.icon} size={20} className="text-neon-cyan mb-3" />
             <h4 className="font-orbitron text-sm font-bold mb-1">{o.title}</h4>
             <p className="text-xs text-muted-foreground">{o.desc}</p>
-          </div>
+          </button>
         ))}
       </div>
-      <div>
-        <h2 className="font-orbitron text-xs tracking-widest text-muted-foreground uppercase mb-3">Очередь загрузки</h2>
-        <div className="space-y-2">
-          {[
-            { name: "video_001.mp4", size: "842 МБ", progress: 78 },
-            { name: "clip_finale.mov", size: "1.2 ГБ", progress: 23 },
-          ].map((f, i) => (
-            <div key={i} className="glass-card rounded-lg p-3 border flex items-center gap-3">
-              <Icon name="FileVideo" size={16} className="text-neon-purple flex-shrink-0" />
-              <div className="flex-1 min-w-0">
-                <div className="flex justify-between text-xs mb-1">
-                  <span className="font-medium truncate">{f.name}</span>
-                  <span className="text-muted-foreground ml-2">{f.size}</span>
+
+      <input ref={fileInputRef} type="file" accept="video/*" className="hidden" onChange={handleFilePick} />
+
+      {activeJob && (
+        <div>
+          <h2 className="font-orbitron text-xs tracking-widest text-muted-foreground uppercase mb-3">Последняя задача</h2>
+          <div className="glass-card rounded-lg p-3 border flex items-center gap-3">
+            <Icon name="FileVideo" size={16} className="text-neon-purple flex-shrink-0" />
+            <div className="flex-1 min-w-0">
+              <div className="flex justify-between text-xs mb-1">
+                <span className="font-medium truncate">{activeJob.name}</span>
+                <span className="text-muted-foreground ml-2">{activeJob.platform}</span>
+              </div>
+              <div className="h-1 bg-muted rounded-full overflow-hidden">
+                <div className="h-full progress-bar-neon rounded-full" style={{ width: phase === "done" ? "100%" : phase === "rendering" ? `${50 + renderProgress/2}%` : `${progress/2}%` }} />
+              </div>
+            </div>
+            <span className="text-xs neon-text-cyan font-orbitron">
+              {phase === "done" ? "ГОТОВО" : phase === "rendering" ? "РЕНДЕР" : phase === "downloading" ? "СКАЧИВАНИЕ" : ""}
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL */}
+      {modalSource && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fade-in" onClick={closeModal}>
+          <div
+            className="glass-card border border-neon-cyan/40 rounded-2xl w-full max-w-2xl max-h-[90vh] overflow-auto relative"
+            style={{ boxShadow: "0 0 40px hsl(var(--neon-cyan)/0.3)" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="p-6 border-b border-border flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-lg bg-neon-cyan/15 border border-neon-cyan/40 flex items-center justify-center">
+                  <Icon name={modalSource === "device" ? "HardDrive" : modalSource === "link" ? "Link" : "Cloud"} size={18} className="text-neon-cyan" />
                 </div>
-                <div className="h-1 bg-muted rounded-full overflow-hidden">
-                  <div className="h-full progress-bar-neon rounded-full" style={{ width: `${f.progress}%` }} />
+                <div>
+                  <h2 className="font-orbitron text-sm font-bold neon-text-cyan tracking-wider">
+                    {modalSource === "device" ? "ЗАГРУЗКА С УСТРОЙСТВА" : modalSource === "link" ? "ЗАГРУЗКА ПО ССЫЛКЕ" : "ЗАГРУЗКА ИЗ ОБЛАКА"}
+                  </h2>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    {modalSource === "device" ? "Выберите файл с компьютера" : modalSource === "link" ? "YouTube, VK, Rutube, TikTok, Vimeo" : "Google Drive, Яндекс Диск, Dropbox"}
+                  </p>
                 </div>
               </div>
-              <span className="text-xs neon-text-cyan font-orbitron">{f.progress}%</span>
+              {!isProcessing && (
+                <button onClick={closeModal} className="p-2 rounded-lg hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors">
+                  <Icon name="X" size={16} />
+                </button>
+              )}
             </div>
-          ))}
+
+            <div className="p-6 space-y-5">
+              {phase === "idle" && (
+                <>
+                  {modalSource === "device" ? (
+                    <div
+                      onClick={() => fileInputRef.current?.click()}
+                      className="rounded-xl border-2 border-dashed border-border hover:border-neon-cyan/60 hover:bg-neon-cyan/5 p-8 text-center cursor-pointer transition-all"
+                    >
+                      {selectedFile ? (
+                        <>
+                          <div className="w-12 h-12 rounded-xl mx-auto mb-3 bg-neon-cyan/20 border border-neon-cyan flex items-center justify-center">
+                            <Icon name="FileVideo" size={22} className="text-neon-cyan" />
+                          </div>
+                          <p className="font-orbitron text-sm font-bold text-foreground truncate">{selectedFile.name}</p>
+                          <p className="text-xs text-muted-foreground mt-1">{(selectedFile.size / 1024 / 1024).toFixed(1)} МБ</p>
+                          <p className="text-xs text-neon-cyan mt-2">Нажмите, чтобы выбрать другой</p>
+                        </>
+                      ) : (
+                        <>
+                          <Icon name="Upload" size={32} className="text-muted-foreground mx-auto mb-3" />
+                          <p className="font-orbitron text-sm text-foreground">Нажмите для выбора файла</p>
+                          <p className="text-xs text-muted-foreground mt-1">MP4, MOV, AVI, MKV до 10 ГБ</p>
+                        </>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      <label className="font-orbitron text-xs text-muted-foreground tracking-wider uppercase">
+                        Вставьте ссылку
+                      </label>
+                      <div className="relative">
+                        <Icon name="Link" size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-neon-cyan" />
+                        <input
+                          type="text"
+                          autoFocus
+                          value={linkUrl}
+                          onChange={(e) => setLinkUrl(e.target.value)}
+                          placeholder={modalSource === "link" ? "https://youtube.com/watch?v=..." : "https://drive.google.com/..."}
+                          className="w-full bg-secondary border border-border focus:border-neon-cyan focus:outline-none rounded-lg pl-10 pr-4 py-3 text-sm text-foreground placeholder:text-muted-foreground font-golos transition-colors"
+                          style={{ boxShadow: linkUrl ? "0 0 12px hsl(var(--neon-cyan)/0.2)" : "none" }}
+                        />
+                      </div>
+                      {linkUrl && (
+                        <div className="flex items-center gap-2 text-xs animate-fade-in">
+                          <div className="w-1.5 h-1.5 rounded-full bg-neon-cyan animate-pulse" />
+                          <span className="text-muted-foreground">Источник определён:</span>
+                          <span className="font-orbitron text-neon-cyan">{detectSourcePlatform(linkUrl)}</span>
+                        </div>
+                      )}
+                      <div className="grid grid-cols-2 gap-2 pt-2">
+                        {(modalSource === "link"
+                          ? ["YouTube", "VK Video", "Rutube", "TikTok"]
+                          : ["Google Drive", "Яндекс Диск", "Dropbox", "iCloud"]
+                        ).map((s) => (
+                          <div key={s} className="flex items-center gap-2 px-3 py-1.5 bg-secondary/60 rounded-md">
+                            <div className="w-1 h-1 rounded-full bg-neon-purple" />
+                            <span className="text-xs text-muted-foreground">{s}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <button
+                    onClick={startJob}
+                    disabled={modalSource === "device" ? !selectedFile : !linkUrl.trim()}
+                    className="neon-btn-solid w-full py-3 rounded-lg font-orbitron text-sm tracking-wider disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:transform-none"
+                  >
+                    НАЧАТЬ
+                  </button>
+                </>
+              )}
+
+              {phase === "downloading" && activeJob && (
+                <div className="space-y-4 animate-fade-in">
+                  <div className="flex items-center gap-3 p-4 bg-neon-cyan/5 border border-neon-cyan/30 rounded-lg">
+                    <div className="relative w-12 h-12 flex items-center justify-center">
+                      <div className="absolute inset-0 rounded-full border-2 border-neon-cyan/20" />
+                      <div className="absolute inset-0 rounded-full border-2 border-transparent border-t-neon-cyan animate-spin" />
+                      <Icon name="Download" size={16} className="text-neon-cyan" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="font-orbitron text-xs neon-text-cyan mb-0.5">СКАЧИВАНИЕ С {activeJob.platform.toUpperCase()}</div>
+                      <div className="text-xs text-muted-foreground truncate">{activeJob.name}</div>
+                    </div>
+                  </div>
+                  <div>
+                    <div className="flex justify-between text-xs mb-2">
+                      <span className="text-muted-foreground">Прогресс</span>
+                      <span className="font-orbitron neon-text-cyan">{Math.round(progress)}%</span>
+                    </div>
+                    <div className="h-2 bg-muted rounded-full overflow-hidden">
+                      <div className="h-full progress-bar-neon rounded-full transition-all duration-300" style={{ width: `${progress}%` }} />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2 text-xs">
+                    <div className="p-2 bg-secondary/50 rounded">
+                      <div className="text-muted-foreground/60">Скорость</div>
+                      <div className="font-orbitron text-foreground">{(8 + Math.random() * 4).toFixed(1)} МБ/с</div>
+                    </div>
+                    <div className="p-2 bg-secondary/50 rounded">
+                      <div className="text-muted-foreground/60">Размер</div>
+                      <div className="font-orbitron text-foreground">{Math.round(progress * 8.4)} МБ</div>
+                    </div>
+                    <div className="p-2 bg-secondary/50 rounded">
+                      <div className="text-muted-foreground/60">ETA</div>
+                      <div className="font-orbitron text-foreground">{Math.max(1, Math.round((100 - progress) / 8))} c</div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {phase === "rendering" && activeJob && (
+                <div className="space-y-4 animate-fade-in">
+                  <div className="flex items-center gap-3 p-4 bg-neon-purple/5 border border-neon-purple/40 rounded-lg scan-line">
+                    <div className="relative w-12 h-12 flex items-center justify-center">
+                      <div className="absolute inset-0 rounded-full bg-neon-purple/10 animate-pulse" />
+                      <Icon name="Cpu" size={18} className="text-neon-purple" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="font-orbitron text-xs neon-text-purple mb-0.5">ИИ-АНАЛИЗ ВИДЕО</div>
+                      <div className="text-xs text-muted-foreground truncate">Детектирование моментов и эффектов</div>
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="flex justify-between text-xs mb-2">
+                      <span className="text-muted-foreground">Рендеринг</span>
+                      <span className="font-orbitron neon-text-purple">{Math.round(renderProgress)}%</span>
+                    </div>
+                    <div className="h-2 bg-muted rounded-full overflow-hidden">
+                      <div
+                        className="h-full rounded-full transition-all duration-300"
+                        style={{
+                          width: `${renderProgress}%`,
+                          background: "linear-gradient(90deg, hsl(var(--neon-purple)), hsl(var(--neon-cyan)))",
+                          boxShadow: "0 0 10px hsl(var(--neon-purple)/0.6)"
+                        }}
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="font-orbitron text-xs text-muted-foreground tracking-wider uppercase mb-2">
+                      Обнаружено моментов: <span className="neon-text-cyan">{detectedMoments.length}</span>
+                    </div>
+                    <div className="space-y-1.5 max-h-48 overflow-auto pr-1">
+                      {detectedMoments.map((m, i) => (
+                        <div key={i} className="flex items-center gap-2 p-2 rounded bg-secondary/40 border border-border animate-fade-in">
+                          <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
+                            m.type === "action" ? "bg-neon-cyan" : m.type === "music" ? "bg-neon-purple" : "bg-[hsl(var(--neon-pink))]"
+                          }`} />
+                          <span className="font-orbitron text-xs text-neon-cyan w-12">{m.time}</span>
+                          <span className="text-xs text-muted-foreground flex-1 truncate">{m.label}</span>
+                          <span className={`text-xs font-orbitron px-1.5 py-0.5 rounded ${
+                            m.type === "action" ? "text-neon-cyan bg-neon-cyan/10" :
+                            m.type === "music" ? "text-neon-purple bg-neon-purple/10" :
+                            "text-[hsl(var(--neon-pink))] bg-[hsl(var(--neon-pink)/0.1)]"
+                          }`}>
+                            {m.type === "action" ? "ДЕЙСТВИЕ" : m.type === "music" ? "МУЗЫКА" : "ЭФФЕКТ"}
+                          </span>
+                        </div>
+                      ))}
+                      {detectedMoments.length === 0 && (
+                        <div className="text-xs text-muted-foreground/60 text-center py-4">Сканирование начинается...</div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {phase === "done" && activeJob && (
+                <div className="space-y-4 animate-fade-in text-center">
+                  <div className="w-16 h-16 rounded-2xl mx-auto bg-neon-cyan/20 border border-neon-cyan flex items-center justify-center animate-glow-pulse">
+                    <Icon name="CheckCircle2" size={28} className="text-neon-cyan" />
+                  </div>
+                  <div>
+                    <h3 className="font-orbitron text-lg font-bold neon-text-cyan mb-1">ГОТОВО</h3>
+                    <p className="text-sm text-muted-foreground">Видео обработано и готово к редактированию</p>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2 text-xs">
+                    <div className="p-3 bg-secondary/50 rounded-lg">
+                      <div className="text-muted-foreground/60 mb-1">Действий</div>
+                      <div className="font-orbitron text-lg neon-text-cyan">{MOMENT_POOL.filter(m => m.type === "action").length}</div>
+                    </div>
+                    <div className="p-3 bg-secondary/50 rounded-lg">
+                      <div className="text-muted-foreground/60 mb-1">Битов</div>
+                      <div className="font-orbitron text-lg neon-text-purple">{MOMENT_POOL.filter(m => m.type === "music").length}</div>
+                    </div>
+                    <div className="p-3 bg-secondary/50 rounded-lg">
+                      <div className="text-muted-foreground/60 mb-1">Эффектов</div>
+                      <div className="font-orbitron text-lg text-[hsl(var(--neon-pink))]">{MOMENT_POOL.filter(m => m.type === "effect").length}</div>
+                    </div>
+                  </div>
+                  <div className="flex gap-2">
+                    <button onClick={closeModal} className="neon-btn flex-1 py-2.5 rounded-lg font-orbitron text-xs">ЗАКРЫТЬ</button>
+                    <button onClick={closeModal} className="neon-btn-solid flex-1 py-2.5 rounded-lg font-orbitron text-xs">ОТКРЫТЬ В РЕДАКТОРЕ</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }
